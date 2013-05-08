@@ -30,7 +30,7 @@ CBPeer *peer = 0;
 #define DEFAULT_PORT    28333
 #define BUF_SIZE        4096
 
-#define NETMAGIC 0xffffffff // mainnet
+// #define NETMAGIC 0xffffffff // mainnet
 //#define NETMAGIC 0x0709110B // testnet
 #define NETMAGIC 0xd0b4bef9 // umdnet
 
@@ -102,7 +102,8 @@ sockread_cb (EV_P_ struct ev_io *w, int revents)
 {
     // Read a header, then read the whole message
     char header[24];
-    recv(sd, header, 24, 0);
+    unsigned int rsize = recv(sd, header, 24, 0);
+    if (rsize != 24) return;
     printf("received header\n");
     if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
         printf("wrong netmagic\n");

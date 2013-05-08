@@ -2,9 +2,9 @@
 
 INCDIR = $(CURDIR)/include
 BINDIR = $(CURDIR)/bin
-CFLAGS += -fPIC -g -Wall  -Wno-uninitialized -Wno-pointer-to-int-cast -pedantic -D_POSIX_C_SOURCE=200809L -I$(INCDIR) -I/afs/csic.umd.edu/class/cmsc417/0101/cs417050/lex_libev/include -I/afs/csic.umd.edu/class/cmsc417/0101/cs417050/myopenssl/include -I/opt/local/include @COMPILE_CONFIG_FLAGS@ -std=c99 #-Werror
-LFLAGS = -L/opt/local/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417050/myopenssl/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417050/lex_libev/lib
-LFLAGS_EXE = -L/opt/local/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417050/myopenssl/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417050/lex_libev/lib
+CFLAGS += -fPIC -g -Wall  -Wno-uninitialized -Wno-pointer-to-int-cast -pedantic -D_POSIX_C_SOURCE=200809L -I$(INCDIR) -I/afs/csic.umd.edu/class/cmsc417/0101/cs417038/openssl/include -I/afs/csic.umd.edu/class/cmsc417/0101/cs417038/libev/include -I/opt/local/include @COMPILE_CONFIG_FLAGS@ -std=c99 #-Werror
+LFLAGS = -L/opt/local/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417038/openssl/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417038/libev/lib
+LFLAGS_EXE = -L/opt/local/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417038/openssl/lib -L/afs/csic.umd.edu/class/cmsc417/0101/cs417038/libev/lib
 
 ifndef OSTYPE
   OSTYPE = $(shell uname -s|awk '{print tolower($$0)}')
@@ -195,4 +195,18 @@ $(EXAMPLES_BINARIES): bin/%: build/%.o
 #	$@
 
 $(EXAMPLES_OBJS): build/%.o: examples/%.c
+	$(CC) -c $(CFLAGS) -I$(CURDIR)/dependencies/storage $< -o $@
+
+# BitShekel Client
+
+CLIENT_FILES = $(wildcard bitshekel/*.c)
+CLIENT_BINARIES = $(patsubst bitshekel/%.c, bin/%, $(CLIENT_FILES))
+CLIENT_OBJS = $(patsubst bitshekel/%.c, build/%.o, $(CLIENT_FILES))
+
+client-build : all-build $(CLIENT_BINARIES)
+
+$(CLIENT_BINARIES): bin/%: build/%.o
+	$(CC) $< -L$(BINDIR) $(LFLAGS_EXE) -lreadline -lncurses -lpthread -lcbitcoin.$(LIBRARY_VERSION) -lcbitcoin-crypto.$(LIBRARY_VERSION) -lcbitcoin-storage.$(LIBRARY_VERSION)  -lcbitcoin.$(LIBRARY_VERSION) -lcbitcoin-file-ec.$(LIBRARY_VERSION) -lcbitcoin-rand.$(LIBRARY_VERSION) -lcrypto -g -o $@
+
+$(CLIENT_OBJS): build/%.o: bitshekel/%.c
 	$(CC) -c $(CFLAGS) -I$(CURDIR)/dependencies/storage $< -o $@
