@@ -4,6 +4,7 @@
 #include <readline/readline.h>
 #include <pthread.h>
 #include <sys/select.h>
+#include <unistd.h>
 
 // Include cbitcoin libraries.
 #include <CBVersion.h>
@@ -14,6 +15,9 @@
 #include <CBChainDescriptor.h>
 #include <CBGetBlocks.h>
 #include <CBBlock.h>
+#include <CBFullValidator.h>
+#include <CBDependencies.h>
+#include <CBInventoryItem.h>
 
 // Client version.
 #define VERSION 70001
@@ -25,7 +29,7 @@
 #define NETMAGIC 0xd0b4bef9		// umdnet netmagic
 
 // Initial client address.
-const uint8_t main_server[4] = {128, 8, 126, 25};
+uint8_t main_server[4] = {128, 8, 126, 25};
 
 // Enum of CB message header size variables.
 typedef enum {
@@ -41,6 +45,11 @@ CBAssociativeArray peerSocks;
 // Global getblocks and chain descriptor variables.
 CBGetBlocks getBlocks;
 CBChainDescriptor chainDesc;
+
+// Global full validator and block chain storage variables.
+CBFullValidator fullVal;
+uint64_t bcStorage;
+bool badBCS;
 
 // Shared running variable.
 bool running = true;
@@ -82,6 +91,10 @@ int main() {
 	if (!CBInitGetBlocks(&getBlocks, VERSION, &chainDesc, hashStop)) {
 		printf("Error initializing get blocks.\n");
 	}
+
+	// Setup full validator and block chain storage.
+	bcStorage = CBNewBlockChainStorage("./shekel");
+	CBInitFullValidator(&fullVal, bcStorage, &badBCS, (CBFullValidatorFlags)NULL);
 
 	// Get genesis block, calculate hash, add to chain descriptor.
 	initBlock = CBNewBlock();
@@ -266,7 +279,7 @@ void connect_client(uint8_t address[4], uint16_t port) {
 	// Create socket.
 	if ((sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("Error creating client socket");
-		return -1;
+		return;
 	}
 
 	// Setup address struct.
@@ -278,7 +291,7 @@ void connect_client(uint8_t address[4], uint16_t port) {
 	// Connect to client.
 	if (connect(sock, (struct sockaddr *)&addr, sizeof addr) < 0) {
 		perror("Error connecting to client");
-		return -1;
+		return;
 	}
 
 	// Setup peer.
@@ -370,7 +383,7 @@ void send_getaddr(CBPeer *peer) {
     // Make checksum.
     uint8_t hash[32];
     uint8_t hash2[32];
-    CBSha256("", 0, hash);
+    CBSha256((unsigned char *)"", 0, hash);
     CBSha256(hash, 32, hash2);
     memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, hash2, 4);
 
@@ -474,9 +487,7 @@ void receive_message(CBPeer *peer) {
  */
 void parse_addr(uint8_t *addr_list) {
 	// Local variables.
-	short storage_len, i;	// Length of array length variable. Iterating short.
-	uint64_t num_addr = 0, j;	// Number of addresses in list. Iterating uint64.
-	uint8_t first_byte = *addr_list;	// First byte of the addr list.
+	uint64_t j;	// Iterating uint64.
 	uint8_t *data;	// Actual address data.
 
 	// Decode the varint and get pointer to data.
@@ -521,9 +532,27 @@ void parse_addr(uint8_t *addr_list) {
 
 void parse_inv(uint8_t *inv_list) {
 	uint8_t *data;
-	CBByteArray *bytes = CBNewByteArrayWithData(inv_list, 8);
+	uint64_t i, new = 0;
+	CBByteArray *getdatalist = NULL;
+
+	CBByteArray *bytes = CBNewByteArrayWithData((uint8_t *)inv_list, 8);
 	CBVarInt var_len = CBVarIntDecode(bytes, 0);
 	data = inv_list + var_len.size;
 
-	printf("%lld\n", var_len.val);
+	for (i = 0; i < var_len.val; i++) {
+		if (data[i * 36] == CB_INVENTORY_ITEM_BLOCK && !CBBlockChainStorageBlockExists(&fullVal, data + (i * 36) + 4)) {
+			if (!getdatalist) {
+				getdatalist = CBNewByteArrayWithDataCopy(data[i * 36], 36);
+			} else {
+				CBByteArray *newlist = CBNewByteArrayOfSize((new + 1) * 36);
+				CBByteArrayCopyByteArray(newlist, new * 36, getdatalist);
+				CBByteArray *temp = getdatalist;
+				getdatalist = newlist;
+				CBFreeByteArray(temp);
+			}
+			new++;
+		}
+	}
+
+	printf("new blocks %lld\n", new);
 }
