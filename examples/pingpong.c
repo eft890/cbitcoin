@@ -102,8 +102,7 @@ sockread_cb (EV_P_ struct ev_io *w, int revents)
 {
     // Read a header, then read the whole message
     char header[24];
-    unsigned int rsize = recv(sd, header, 24, 0);
-    if (rsize != 24) return;
+    recv(sd, header, 24, 0);
     printf("received header\n");
     if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
         printf("wrong netmagic\n");
