@@ -285,6 +285,7 @@ bool CBBlockChainStorageLoadOrphan(void * validator, uint8_t orphanNum){
 		return false;
 	}
 	validatorObj->orphans[orphanNum] = CBNewBlockFromData(orphanData);
+        CBBlockDeserialise(validatorObj->orphans[orphanNum], true);
 	if (NOT validatorObj->orphans[orphanNum]) {
 		CBLogError("There was an error when creating a block object for an orphan.");
 		CBReleaseObject(orphanData);
