@@ -38,6 +38,8 @@
 
 #define CB_BLOCK_MAX_SIZE 1000000 // ~0.95 MB
 
+#define UMDNET
+
 /**
  @brief Structure for CBBlock objects. @see CBBlock.h
 */

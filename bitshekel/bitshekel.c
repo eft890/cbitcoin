@@ -95,7 +95,7 @@ int main() {
 	remove("./bitshekel/blk_1.dat");
 	remove("./bitshekel/blk_2.dat");
 	bcStorage = CBNewBlockChainStorage("./bitshekel/");
-	CBInitFullValidator(&fullVal, bcStorage, &badBCS, (CBFullValidatorFlags)NULL);
+	CBInitFullValidator(&fullVal, bcStorage, &badBCS, 0);
 
 	// Setup the initial connection.
 	connect_client(main_server, DEFAULT_PORT);
@@ -711,9 +711,11 @@ void parse_inv(uint8_t *inv_list) {
 	invbroad->items = invitems;
 }
 
+/**
+ * Parse a block.
+ * blockdata: Raw byte data of block.
+ */
 void parse_block(uint8_t *blockdata) {
-	uint8_t hash[32];
-	uint8_t hash2[32];
 	CBByteArray *txbytes;
 	CBBlock *block;
 	CBVarInt tx_len;
@@ -721,39 +723,46 @@ void parse_block(uint8_t *blockdata) {
 	CBTransaction **transactions;
 	time_t nettime;
 
+	// Get the current time.
 	nettime = time(NULL);
-
-	CBSha256(blockdata, 80, hash);
-	CBSha256(hash, 32, hash2);
 	
+	// Get the size/value of the varint for number of transactions.
 	txbytes = CBNewByteArrayWithData((uint8_t *)(blockdata + 80), 8);
 	tx_len = CBVarIntDecode(txbytes, 0);
 
+	// Create the block object.
 	block = CBNewBlock();
-	memcpy(block->hash, hash2, 32);
-	block->hashSet = true;
-	block->version = blockdata[0];
-	block->prevBlockHash = CBNewByteArrayWithDataCopy(blockdata + 4, 32);
-	block->merkleRoot = CBNewByteArrayWithDataCopy(blockdata + 36, 32);
-	block->time = blockdata[68];
-	block->target = blockdata[72];
-	block->nonce = blockdata[76];
-	block->transactionNum = tx_len.val;
+	block->version = blockdata[0];	// Set version.
+	block->prevBlockHash = CBNewByteArrayWithDataCopy(blockdata + 4, 32);	// Copy prev block hash.
+	block->merkleRoot = CBNewByteArrayWithDataCopy(blockdata + 36, 32);	// Copy merkleRoot.
+	block->time = blockdata[68];	// Set the timestamp of the block.
+	block->target = blockdata[72];	// Set the difficulty target of the block.
+	block->nonce = blockdata[76];	// Set the nonce.
+	block->transactionNum = tx_len.val;	// Set the number of transactions.
 
+	// Allocate memory for the array of transaction objects.
 	transactions = malloc(tx_len.val * sizeof(CBTransaction *));
+	// Loop through and parse transactions.
 	for (i = 0; i < tx_len.val; i++) {
 		transactions[i] = parse_tx(blockdata + 80 + tx_len.size + tx_curr_size, &txsize);
 		tx_curr_size += txsize;
 	}
+	block->transactions = transactions;
 
+	// Serialise block and calculate the block hash.
+	block->base.bytes = CBNewByteArrayOfSize(CBBlockCalculateLength(block, false));
+	CBBlockSerialise(block, false, false);
+	CBBlockCalculateHash(block, block->hash);
+
+	// Process the block.
 	CBBlockStatus stat = CBFullValidatorProcessBlock(&fullVal, block, nettime);
 	if (stat != CB_BLOCK_STATUS_BAD) printf("block status %d\n", stat);
 }
 
 /**
- * Parses a transaction memory block.
+ * Parses a transaction.
  * txdata: Raw byte data of transaction.
- * length: A length variable to set as the size of this transaction.
+ * length: A length variable to set as the size of this transaction. Can be NULL.
  * returns: Pointer to a CBTransaction.
  */
 CBTransaction *parse_tx(uint8_t *txdata, uint64_t *length) {
@@ -804,7 +813,7 @@ CBTransaction *parse_tx(uint8_t *txdata, uint64_t *length) {
 
 	tx = CBNewTransaction(outdata[outsize], txdata[0]);
 
-	*length = totalsize;
+	if (length) *length = totalsize;
 
 	return tx;
 }
