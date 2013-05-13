@@ -49,7 +49,7 @@ typedef enum {
 CBAssociativeArray peerSocks;
 
 // Global full validator and block chain storage variables.
-CBFullValidator fullVal;
+CBFullValidator *fullVal;
 uint64_t bcStorage;
 bool badBCS;
 
@@ -109,7 +109,7 @@ int main() {
 	remove("./bitshekel/blk_1.dat");
 	remove("./bitshekel/blk_2.dat");
 	bcStorage = CBNewBlockChainStorage("./bitshekel/");
-	CBInitFullValidator(&fullVal, bcStorage, &badBCS, 0);
+	fullVal = CBNewFullValidator(bcStorage, &badBCS, 0);
 
 	// Setup the initial connection.
 	kaleIP = CBNewByteArrayWithDataCopy(kaleIPArr, 16);
@@ -205,6 +205,9 @@ int main() {
 	// Cleanup memory.
 	CBReleaseObject(&peerSocks);
 	CBReleaseObject(kaleAddr);
+	CBReleaseObject(fullVal);
+	CBFreeBlockChainStorage(bcStorage);
+	if (invbroad) CBReleaseObject(invbroad);
 
 	return 0;
 }
@@ -467,7 +470,6 @@ void send_version(CBPeer *peer) {
 	// Copy into the final message object.
 	qmessage = CBNewMessageByObject();
 	CBInitMessageByData(qmessage, message->bytes);
-	CBRetainObject(message->bytes);
 	qmessage->type = CB_MESSAGE_TYPE_VERSION;
 
 	// Kick off version exchange by sending our version.
@@ -546,8 +548,8 @@ void send_getaddr(CBPeer *peer) {
  */
 void send_getblocks(CBPeer *peer) {
 	uint32_t message_len;
-	CBGetBlocks getBlocks;
-	CBChainDescriptor chainDesc;
+	CBGetBlocks *getBlocks;
+	CBChainDescriptor *chainDesc;
 	CBBlock *block;
 	CBByteArray *blockHash, *hashStop;
 	CBMessage *message, *qmessage;
@@ -555,18 +557,16 @@ void send_getblocks(CBPeer *peer) {
 	int step = 1, index = 0, next = 0, branchNum, branchIndex;
 
 	// Initialize chain descriptor.
-	if (!CBInitChainDescriptor(&chainDesc)) {
-		printf("Error initializing chain descriptor.\n");
-	}
+	chainDesc = CBNewChainDescriptor();
 
 	// Setup branch vars to point to head of main branch.
-	branchNum = fullVal.mainBranch;
-	branchIndex = fullVal.branches[branchNum].numBlocks - 1;
+	branchNum = fullVal->mainBranch;
+	branchIndex = fullVal->branches[branchNum].numBlocks - 1;
 	
 	// Loop and build chain descriptor.
 	while (building) {
 		// Load block from storage.
-		block = CBBlockChainStorageLoadBlock(&fullVal, branchIndex, branchNum);
+		block = CBBlockChainStorageLoadBlock(fullVal, branchIndex, branchNum);
 		if (!block) return;
 
 		// Setup branch index/number for next loop.
@@ -574,10 +574,10 @@ void send_getblocks(CBPeer *peer) {
 		if (branchIndex < 0) {
 			// If we are past index 0 of branch, check parent branch.
 			// If parent branch matches current branch, we are at the end.
-			if (fullVal.branches[branchNum].parentBranch == branchNum)
+			if (fullVal->branches[branchNum].parentBranch == branchNum)
 				building = false;
-			branchIndex = fullVal.branches[branchNum].parentBlockIndex;
-			branchNum = fullVal.branches[branchNum].parentBranch;
+			branchIndex = fullVal->branches[branchNum].parentBlockIndex;
+			branchNum = fullVal->branches[branchNum].parentBranch;
 		}
 
 		// If we are at the next hash to add...
@@ -589,37 +589,38 @@ void send_getblocks(CBPeer *peer) {
 			// Get hash and add.
 			blockHash = CBNewByteArrayWithDataCopy(CBBlockGetHash(block), 32);
 			if (index == 0) hashStop = blockHash;
-			CBChainDescriptorAddHash(&chainDesc, blockHash);
+			CBChainDescriptorAddHash(chainDesc, blockHash);
+			CBReleaseObject(blockHash);
+			blockHash = NULL;
 		}
 		index++;
 
 		// Cleanup memory.
 		CBReleaseObject(block);
+		if (blockHash) CBReleaseObject(blockHash);
 	}
 
 	// Initialize get blocks.
-	if (!CBInitGetBlocks(&getBlocks, VERSION, &chainDesc, hashStop)) {
-		printf("Error initializing get blocks.\n");
-	}
+	getBlocks = CBNewGetBlocks(VERSION, chainDesc, hashStop);
 
-	printf("hashes sent: %d\n", chainDesc.hashNum);
+	printf("hashes sent: %d\n", chainDesc->hashNum);
 
 	// Generate serialized data for message.
-	message = CBGetMessage(&getBlocks);
-	message_len = CBGetBlocksCalculateLength(&getBlocks);
+	message = CBGetMessage(getBlocks);
+	message_len = CBGetBlocksCalculateLength(getBlocks);
 	message->bytes = CBNewByteArrayOfSize(message_len);
-	message_len = CBGetBlocksSerialise(&getBlocks, false);
+	message_len = CBGetBlocksSerialise(getBlocks, false);
 
 	// Copy message into a message that won't be freed.
 	qmessage = CBNewMessageByObject();
 	qmessage->type = CB_MESSAGE_TYPE_GETBLOCKS;
 	CBInitMessageByData(qmessage, message->bytes);
-	CBRetainObject(message->bytes);
 
 	queue_message(peer, qmessage);
 
 	// Cleanup memory
-	CBReleaseObject(hashStop);
+	CBReleaseObject(getBlocks);
+	free(chainDesc);
 }
 
 /**
@@ -640,7 +641,6 @@ void send_getdata(CBPeer *peer) {
 	qmessage = CBNewMessageByObject();
 	qmessage->type = CB_MESSAGE_TYPE_GETDATA;
 	CBInitMessageByData(qmessage, message->bytes);
-	CBRetainObject(message->bytes);
 
 	queue_message(peer, qmessage);
 
@@ -703,6 +703,7 @@ void receive_message(CBPeer *peer) {
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "tx\0\0\0\0\0\0\0\0\0\0", 12)) {
 		printf("tx header\n");
+		parse_tx((uint8_t *)payload, tread);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
 		printf("ping header\n");
@@ -721,31 +722,40 @@ void receive_message(CBPeer *peer) {
  * addrlistdata: Pointer to the memory location of the address list.
  */
 void parse_addr(uint8_t *addrlistdata) {
-	// Local variables.
-	uint64_t j;	// Iterating uint64.
-	uint8_t *data;	// Actual address data.
+	uint64_t j;
+	uint8_t *data;
+	CBByteArray *bytes, *addrdata;
+	CBVarInt var_len;
+	CBNetworkAddress *addr;
+	CBPeer *findpeer;
 
 	// Decode the varint and get pointer to data.
-	CBByteArray *bytes = CBNewByteArrayWithData(addrlistdata, 8);
-	CBVarInt var_len = CBVarIntDecode(bytes, 0);
+	bytes = CBNewByteArrayWithDataCopy(addrlistdata, 8);
+	var_len = CBVarIntDecode(bytes, 0);
 	data = addrlistdata + var_len.size;
 
 	// Loop through address list elements.
 	for (j = 0; j < var_len.val; j++) {
 		// Copy raw bytes and deserialize.
-		CBByteArray *addrdata = CBNewByteArrayWithDataCopy(data + (j * 30), 30);
-		CBNetworkAddress *addr = CBNewNetworkAddressFromData(addrdata, true);
+		addrdata = CBNewByteArrayWithDataCopy(data + (j * 30), 30);
+		addr = CBNewNetworkAddressFromData(addrdata, true);
 		CBNetworkAddressDeserialise(addr, true);
 
 		// Create peer and check data structure.
-		CBPeer *findpeer = CBNewPeerByTakingNetworkAddress(addr);
+		findpeer = CBNewPeerByTakingNetworkAddress(addr);
 		CBFindResult find = CBAssociativeArrayFind(&peerSocks, findpeer);
 
 		// If client is not in data structure, connect to the client.
 		if (!find.found) {
 			// connect_client(findpeer);
 		}
+
+		// Cleanup memory.
+		CBReleaseObject(findpeer);
+		CBReleaseObject(addrdata);
 	}
+
+	CBReleaseObject(bytes);
 }
 
 /**
@@ -756,20 +766,24 @@ void parse_addr(uint8_t *addrlistdata) {
 void parse_inv(uint8_t *invdata, unsigned int length) {
 	CBByteArray *invbroadba;
 
+	// Check if there was an invbroad ready to send but was never sent.
+	if (invbroad) CBReleaseObject(invbroad);
+
 	// Copy raw bytes and deserialise.
 	invbroadba = CBNewByteArrayWithDataCopy(invdata, length);
 	invbroad = CBNewInventoryBroadcastFromData(invbroadba);
 	CBInventoryBroadcastDeserialise(invbroad);
 
-	// If we receive no inventory items, we are up to date.
-	if (!invbroad->itemNum) uptodate = true;
-	else if(invbroad->itemNum && uptodate) uptodate = false;
+	// Set up to date status. If 500 are received, false, otherwise true.
+	if (invbroad->itemNum >= 500) uptodate = false;
+	else uptodate = true;
 
-	// We've received the response to getblocks, set flag.
+	// We've received the response to getblocks, set inv count and flag.
 	lastGetData = invbroad->itemNum;
 	getblockssent = false;
 
 	printf("items received: %d\n", invbroad->itemNum);
+	CBReleaseObject(invbroadba);
 }
 
 /**
@@ -787,10 +801,11 @@ void parse_block(uint8_t *blockdata, unsigned int length) {
 	CBBlockDeserialise(block, true);
 
 	// Process the block.
-	CBFullValidatorProcessBlock(&fullVal, block, time(NULL));
+	CBFullValidatorProcessBlock(fullVal, block, time(NULL));
 
 	// Reduce count of get data request.
 	lastGetData--;
+	if (!lastGetData) printf("processing done\n");
 
 	// Cleanup memory.
 	CBReleaseObject(block);
@@ -810,4 +825,7 @@ void parse_tx(uint8_t *txdata, unsigned int length) {
 	txba = CBNewByteArrayWithDataCopy(txdata, length);
 	tx = CBNewTransactionFromData(txba);
 	CBTransactionDeserialise(tx);
+
+	CBReleaseObject(tx);
+	CBReleaseObject(txba);
 }
