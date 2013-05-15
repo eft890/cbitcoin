@@ -69,6 +69,7 @@ bool badBCS;
 
 // Shared inventory broadcast object. Will be filled when there is inventory to broadcast.
 CBInventoryBroadcast *invbroad = NULL;
+CBInventoryItemType invtype;
 int lastGetData = 0;
 bool uptodate = false, getblockssent = false;
 int numWaiting = 0;
@@ -88,8 +89,9 @@ typedef struct {
 } UnspentOutput;
 
 // List of hashes for transactions in which we have spendable coins.
-unsigned int numOwned = 0;
+unsigned int numOwned = 0, ownedStart = 0, numKnownTx = 0;
 UnspentOutput *ownedOutputs = NULL;
+CBTransaction **txs;
 
 // Shared running variable.
 bool running = true;
@@ -117,9 +119,12 @@ void send_pong(CBPeer *peer, int nonce);
 void send_getaddr(CBPeer *peer);
 void send_getblocks(CBPeer *peer);
 void send_getdata(CBPeer *peer);
+void send_inv(CBPeer *peer);
+void send_tx(CBPeer *peer, uint8_t *hash);
 void receive_message(CBPeer *peer);
 void parse_addr(uint8_t *addrlistdata);
 void parse_inv(uint8_t *invdata, unsigned int length);
+void parse_getdata(uint8_t *gddata, unsigned int length, CBPeer *peer);
 void parse_block(uint8_t *blockdata, unsigned int block);
 void parse_tx(uint8_t *txdata, unsigned int length);
 
@@ -209,7 +214,8 @@ int main(int argc, char *argv[]) {
 					numWaiting = 0;
 					getblockssent = true;
 				} else if (invbroad) {
-					send_getdata(peer);
+					if (invtype == CB_INVENTORY_ITEM_BLOCK) send_getdata(peer);
+					else if (invtype == CB_INVENTORY_ITEM_TRANSACTION) send_inv(peer);
 				}
 			}
 		} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
@@ -348,16 +354,18 @@ void rl_handler(char *line) {
  */
 void handle_command(char *line) {
 	char delim[] = " ";
-	char *command = NULL, *arg1 = NULL, *arg2 = NULL, *temp = NULL;
-	int count = 0;
+	char *command = NULL, **args = NULL, *temp = NULL;
+	int count = 0, i;
 	uint64_t amt;
 
 	// Loop through and receive all arguments.
 	temp = strtok(line, delim);
 	while (temp) {
 		if (count == 0) command = temp;
-		else if (count == 1) arg1 = temp;
-		else if (count == 2) arg2 = temp;
+		else {
+			args = realloc(args, sizeof(char *) * count);
+			args[count - 1] = temp;
+		}
 		temp = strtok(NULL, delim);
 		count++;
 	}
@@ -383,69 +391,70 @@ void handle_command(char *line) {
 		printf("Unspent coins: %llu", calculate_owned_coins());
 		if (!uptodate) printf(" (Warning: not up to date!)");
 		printf("\n");
-		return;
-	}
 
 	// Spend coins.
-	if (!strcmp(command, "spend")) {
+	} else if (!strcmp(command, "spend")) {
 		if (count != 3) {
 			printf("Usage: spend <amount> <address>\n");
 			return;
 		}
-		amt = strtoull(arg1, NULL, 10);
+		amt = strtoull(args[0], NULL, 10);
 		if (amt > calculate_owned_coins()) {
 			printf("Not enough coins!\n");
 		}
 
-		spend_coins(amt, arg2, strlen(arg2));
-		return;
-	}
+		spend_coins(amt, args[1], strlen(args[1]));
 
-	if (!strcmp(command, "show")) {
+	} else if (!strcmp(command, "show")) {
 		if (count == 1) printf("%d\n", numWaiting);
 		else {
-			if (!strcmp(arg1, "debug")) {
-				printf("Showing debug logging.\n");
-				debug = true;
-			}
-			if (!strcmp(arg1, "sizes")) {
-				printf("Showing receive size logging.\n");
-				show_rcv = true;
-			}
-			if (!strcmp(arg1, "blocks")) {
-				printf("Showing block logging.\n");
-				show_blocks = true;
-			}
-			if (!strcmp(arg1, "timeouts")) {
-				printf("Showing timeout logging.\n");
-				show_timeouts = true;
+			for (i = 0; i < count - 1; i++) {
+				if (!strcmp(args[i], "debug")) {
+					printf("Showing debug logging.\n");
+					debug = true;
+				}
+				if (!strcmp(args[i], "sizes")) {
+					printf("Showing receive size logging.\n");
+					show_rcv = true;
+				}
+				if (!strcmp(args[i], "blocks")) {
+					printf("Showing block logging.\n");
+					show_blocks = true;
+				}
+				if (!strcmp(args[i], "timeouts")) {
+					printf("Showing timeout logging.\n");
+					show_timeouts = true;
+				}
 			}
 		}
-		return;
-	}
 
-	if (!strcmp(command, "hide")) {
+	} else if (!strcmp(command, "hide")) {
 		if (count > 1) {
-			if (!strcmp(arg1, "debug")) {
-				printf("Hiding debug logging.\n");
-				debug = false;
-			}
-			if (!strcmp(arg1, "sizes")) {
-				printf("Hiding receive size logging.\n");
-				show_rcv = false;
-			}
-			if (!strcmp(arg1, "blocks")) {
-				printf("Hiding block logging.\n");
-				show_blocks = false;
-			}
-			if (!strcmp(arg1, "timeouts")) {
-				printf("Hiding timeout logging.\n");
-				show_timeouts = false;
+			for (i = 0; i < count - 1; i++) {
+				if (!strcmp(args[i], "debug")) {
+					printf("Hiding debug logging.\n");
+					debug = false;
+				}
+				if (!strcmp(args[i], "sizes")) {
+					printf("Hiding receive size logging.\n");
+					show_rcv = false;
+				}
+				if (!strcmp(args[i], "blocks")) {
+					printf("Hiding block logging.\n");
+					show_blocks = false;
+				}
+				if (!strcmp(args[i], "timeouts")) {
+					printf("Hiding timeout logging.\n");
+					show_timeouts = false;
+				}
 			}
 		}
+
+	} else {
+		printf("Command not recognized!\n");
 	}
 
-	printf("Command not recognized!\n");
+	free(args);
 }
 
 /**
@@ -456,7 +465,7 @@ uint64_t calculate_owned_coins() {
 	unsigned int i;
 	uint64_t total;
 
-	for (i = 0; i < numOwned; i++)
+	for (i = ownedStart; i < numOwned; i++)
 		if (CBBlockChainStorageUnspentOutputExists(fullVal, CBByteArrayGetData(ownedOutputs[i].txHash), ownedOutputs[i].outputIndex))
 			total += ownedOutputs[i].amount;
 
@@ -485,7 +494,7 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 	CBInventoryItem *invitem;
 
 	// Loop through and grab inputs.
-	for (i = 0; i < numOwned; i++) {
+	for (i = ownedStart; i < numOwned; i++) {
 		// If we have enough coins now, quit.
 		if (totalInputCoins >= spendAmount) break;
 
@@ -542,6 +551,8 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 			if (CBTransactionGetInputHashForSignature(tx, unspentOut->scriptObject, i, CB_SIGHASH_SINGLE, inputHash)) return;
 			// Generate signature using private key.
 			CBEcdsaSign(inputHash, privateKey, &sig_len, &sig);
+			sig_len++;
+			sig[sig_len - 1] = CB_SIGHASH_SINGLE;
 
 			// Create script and set bytes.
 			ins[i]->scriptObject = CBNewScriptOfSize(sig_len + PUBLIC_KEY_LEN + 2);
@@ -552,7 +563,26 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 			free(sig);
 		}
 
-		// Serialise the transaction and put the data into an inventory item.
+		// Serialize transaction for hash.
+		CBGetMessage(tx)->bytes = CBNewByteArrayOfSize(CBTransactionCalculateLength(tx));
+		CBTransactionSerialise(tx, false);
+
+		// Calculate transaction hash and put the data into an inventory item.
+		invitem = CBNewInventoryItem(CB_INVENTORY_ITEM_TRANSACTION, CBNewByteArrayWithDataCopy(CBTransactionGetHash(tx), 32));
+
+		// Create inventory broadcast.
+		invbroad = CBNewInventoryBroadcast();
+		invbroad->items = malloc(sizeof(CBInventoryItem *));
+		invbroad->items[0] = invitem;
+		invtype = CB_INVENTORY_ITEM_TRANSACTION;
+
+		// Add transaction to known transactions.
+		numKnownTx++;
+		txs = realloc(txs, sizeof(CBTransaction *) * numKnownTx);
+		txs[numKnownTx - 1] = tx;
+
+		// Unmark the spent outputs.
+		ownedStart += numins;
 	} else {
 		printf("Not enough coins!\n");
 	}
@@ -674,19 +704,41 @@ bool send_message(CBPeer *peer, CBMessage *message) {
 	// Setup header.
 	switch (message->type) {
 		case CB_MESSAGE_TYPE_VERSION:
-			strcpy(mtype, "version"); break;
+			strcpy(mtype, "version");
+			if (debug) printf("version out\n");
+			break;
 		case CB_MESSAGE_TYPE_GETADDR:
-			strcpy(mtype, "getaddr"); break;
+			strcpy(mtype, "getaddr");
+			if (debug) printf("getaddr out\n");
+			break;
 		case CB_MESSAGE_TYPE_GETBLOCKS:
-			strcpy(mtype, "getblocks"); break;
+			strcpy(mtype, "getblocks");
+			if (debug) printf("getblocks out\n");
+			break;
 		case CB_MESSAGE_TYPE_GETDATA:
-			strcpy(mtype, "getdata"); break;
+			strcpy(mtype, "getdata");
+			if (debug) printf("getdata out\n");
+			break;
 		case CB_MESSAGE_TYPE_PING:
-			strcpy(mtype, "ping"); break;
+			strcpy(mtype, "ping");
+			if (debug) printf("ping out\n");
+			break;
 		case CB_MESSAGE_TYPE_PONG:
-			strcpy(mtype, "pong"); break;
+			strcpy(mtype, "pong");
+			if (debug) printf("pong out\n");
+			break;
 		case CB_MESSAGE_TYPE_VERACK:
-			strcpy(mtype, "verack"); break;
+			strcpy(mtype, "verack");
+			if (debug) printf("verack out\n");
+			break;
+		case CB_MESSAGE_TYPE_INV:
+			strcpy(mtype, "inv");
+			if (debug) printf("inv out\n");
+			break;
+		case CB_MESSAGE_TYPE_TX:
+			strcpy(mtype, "tx");
+			if (debug) printf("tx out\n");
+			break;
 		default:
 			return false;
 	}
@@ -945,6 +997,58 @@ void send_getdata(CBPeer *peer) {
 }
 
 /**
+ * Send an inv message to a peer.
+ * peer: Peer to send inv to.
+ */
+void send_inv(CBPeer *peer) {
+	uint32_t message_len;
+	CBMessage *message, *qmessage;
+
+	// Generate serialized data for message.
+	message = CBGetMessage(invbroad);
+	message_len = CBInventoryBroadcastCalculateLength(invbroad);
+	message->bytes = CBNewByteArrayOfSize(message_len);
+	message_len = CBInventoryBroadcastSerialise(invbroad, false);
+
+	// Copy message into a message that won't be freed.
+	qmessage = CBNewMessageByObject();
+	qmessage->type = CB_MESSAGE_TYPE_INV;
+	CBInitMessageByData(qmessage, message->bytes);
+
+	queue_message(peer, qmessage);
+
+	// Cleanup memory.
+	CBReleaseObject(invbroad);
+	invbroad = NULL;
+}
+
+/**
+ * Send a tx message to a peer.
+ * peer: Peer to send transaction to.
+ * hash: Hash of the transaction you want to send.
+ */
+void send_tx(CBPeer *peer, uint8_t *hash) {
+	unsigned int i;
+	uint32_t message_len;
+	CBMessage *message;
+
+	// Loop through known transactions.
+	for (i = 0; i < numKnownTx; i++) {
+		if (!memcmp(txs[i]->hash, hash, 32)) {
+			// Generate serialized data for message.
+			message = CBGetMessage(txs[i]);
+			message_len = CBTransactionCalculateLength(txs[i]);
+			message->bytes = CBNewByteArrayOfSize(message_len);
+			message_len = CBTransactionSerialise(txs[i], false);
+
+			queue_message(peer, message);
+
+			return;
+		}
+	}
+}
+
+/**
  * Receive a message from a peer.
  * peer: peer to receive a message from.
  */
@@ -975,40 +1079,40 @@ void receive_message(CBPeer *peer) {
 
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
 		// If we received a version header.
-		if (debug) printf("version header\n");
+		if (debug) printf("version in\n");
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
 		// If we received a verack, update the peer info to say we have finished
 		// the version exchange.
 		peer->versionAck = true;
-		if (debug) printf("verack header\n");
+		if (debug) printf("verack in\n");
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
 		// We've received a addr. Parse the payload for peers.
-		if (debug) printf("addr header\n");
+		if (debug) printf("addr in\n");
 		parse_addr((uint8_t *)payload);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		// We've received an inv header. Parse the payload for inventory.
-		if (debug) printf("inv header\n");
+		if (debug) printf("inv in\n");
 		parse_inv((uint8_t *)payload, tread);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12)) {
 		// We've received a block header. Parse it into a block and process.
-		if (debug && show_blocks) printf("block header\n");
+		if (debug && show_blocks) printf("block in\n");
 		parse_block((uint8_t *)payload, tread);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "tx\0\0\0\0\0\0\0\0\0\0", 12)) {
-		if (debug) printf("tx header\n");
+		if (debug) printf("tx in\n");
 		parse_tx((uint8_t *)payload, tread);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
-		if (debug) printf("ping header\n");
+		if (debug) printf("ping in\n");
 		int nonce = payload[4];
 		send_pong(peer, nonce);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
-		if (debug) printf("pong header\n");
+		if (debug) printf("pong in\n");
 	}
 
 	// Free payload.
@@ -1071,6 +1175,7 @@ void parse_inv(uint8_t *invdata, unsigned int length) {
 	invbroadba = CBNewByteArrayWithDataCopy(invdata, length);
 	invbroad = CBNewInventoryBroadcastFromData(invbroadba);
 	CBInventoryBroadcastDeserialise(invbroad);
+	invtype = CB_INVENTORY_ITEM_BLOCK;
 
 	// We've received the response to getblocks, set inv count and flag.
 	lastGetData = invbroad->itemNum;
@@ -1078,6 +1183,32 @@ void parse_inv(uint8_t *invdata, unsigned int length) {
 
 	if (debug) printf("items received: %d\n", invbroad->itemNum);
 	CBReleaseObject(invbroadba);
+}
+
+/**
+ * Parse a get data message. Also an inventory list. Calls appropriate sends.
+ * gddata: The raw bytes of the invetory list.
+ * length: Length of the raw bytes.
+ * peer: Peer to send the data back to.
+ */
+void parse_getdata(uint8_t *gddata, unsigned int length, CBPeer *peer) {
+	CBByteArray *invitemsba;
+	CBInventoryBroadcast *invitems;
+	CBInventoryItem *invitem;
+	uint16_t i;
+
+	// Copy raw bytes and deserialise.
+	invitemsba = CBNewByteArrayWithDataCopy(gddata, length);
+	invitems = CBNewInventoryBroadcastFromData(invitemsba);
+	CBInventoryBroadcastDeserialise(invitems);
+
+	// Loop through inventory items...
+	for (i = 0; i < invitems->itemNum; i++) {
+		invitem = invitems->items[i];
+		if (invitem->type == CB_INVENTORY_ITEM_TRANSACTION) {
+			send_tx(peer, CBByteArrayGetData(invitem->hash));
+		}
+	}
 }
 
 /**
