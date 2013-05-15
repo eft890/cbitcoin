@@ -213,7 +213,8 @@ int main(int argc, char *argv[]) {
 					send_getblocks(peer);
 					numWaiting = 0;
 					getblockssent = true;
-				} else if (invbroad) {
+				}
+				if (invbroad) {
 					if (invtype == CB_INVENTORY_ITEM_BLOCK) send_getdata(peer);
 					else if (invtype == CB_INVENTORY_ITEM_TRANSACTION) send_inv(peer);
 				}
@@ -468,6 +469,8 @@ uint64_t calculate_owned_coins() {
 	for (i = ownedStart; i < numOwned; i++)
 		if (CBBlockChainStorageUnspentOutputExists(fullVal, CBByteArrayGetData(ownedOutputs[i].txHash), ownedOutputs[i].outputIndex))
 			total += ownedOutputs[i].amount;
+		else
+			ownedStart++;
 
 	return total;
 }
@@ -508,7 +511,8 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 			ins[numins - 1] = CBNewUnsignedTransactionInput(CB_TRANSACTION_INPUT_FINAL, ownedOutputs[i].txHash, ownedOutputs[i].outputIndex);
 			// Update total coins.
 			totalInputCoins += ownedOutputs[i].amount;
-		}
+		} else
+			ownedStart++;
 	}
 
 	// If we have enough coins...
@@ -574,6 +578,7 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 		invbroad = CBNewInventoryBroadcast();
 		invbroad->items = malloc(sizeof(CBInventoryItem *));
 		invbroad->items[0] = invitem;
+		invbroad->itemNum = 1;
 		invtype = CB_INVENTORY_ITEM_TRANSACTION;
 
 		// Add transaction to known transactions.
@@ -772,6 +777,8 @@ bool send_message(CBPeer *peer, CBMessage *message) {
 			peer->getAddresses = true; break;
 		default: break;
 	}
+
+	CBReleaseObject(message);
 
 	return true;
 }
@@ -1040,6 +1047,7 @@ void send_tx(CBPeer *peer, uint8_t *hash) {
 			message_len = CBTransactionCalculateLength(txs[i]);
 			message->bytes = CBNewByteArrayOfSize(message_len);
 			message_len = CBTransactionSerialise(txs[i], false);
+			message->type = CB_MESSAGE_TYPE_TX;
 
 			queue_message(peer, message);
 
@@ -1113,6 +1121,10 @@ void receive_message(CBPeer *peer) {
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
 		if (debug) printf("pong in\n");
+	}
+	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "getdata\0\0\0\0\0", 12)) {
+		if (debug) printf("getdata in\n");
+		parse_getdata((uint8_t *)payload, tread, peer);
 	}
 
 	// Free payload.
