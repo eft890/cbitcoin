@@ -106,7 +106,7 @@ CBCompare compare_peers(void *key1, void *key2);
 void rl_handler(char *line);
 void handle_command(char *line);
 uint64_t calculate_owned_coins();
-void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len);
+void spend_coins(uint64_t* spendAmounts, char **addresses, int numSpends);
 void connect_client(CBNetworkAddress *addr);
 bool send_message(CBPeer *peer, CBMessage *message);
 bool queue_message(CBPeer *peer, CBMessage *message);
@@ -172,7 +172,7 @@ int main(int argc, char *argv[]) {
 	connect_client(kaleAddr);
 
 	// Create our bitcoin address.
-	bc_addressba = CBNewByteArrayWithDataCopy(BC_ADDRESS, BC_ADDRESS_LEN);
+	bc_addressba = CBNewByteArrayWithDataCopy((uint8_t *)BC_ADDRESS, BC_ADDRESS_LEN);
 	bc_address = CBNewVersionChecksumBytesFromString(bc_addressba, false);
 	publicAddr = CBByteArraySubReference(CBGetByteArray(bc_address), 1, 20);
 
@@ -272,10 +272,11 @@ int main(int argc, char *argv[]) {
 				while (peer->sendQueueSize) {
 					peer = (CBPeer *)(iter.node->elements[iter.index]);
 					message = dequeue_message(peer);
-					if (!send_message(peer, message))
+					if (!send_message(peer, message)) {
 						if (debug) printf("Send unsuccessful.\n");
-					else
+					} else {
 						CBReleaseObject(message);
+					}
 				}
 			} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
 		}
@@ -355,9 +356,10 @@ void rl_handler(char *line) {
  */
 void handle_command(char *line) {
 	char delim[] = " ";
-	char *command = NULL, **args = NULL, *temp = NULL;
+	char *command = NULL, **args = NULL, *temp = NULL, **addrs = NULL;
 	int count = 0, i;
-	uint64_t amt;
+	uint64_t *amts = NULL, tamt = 0;
+	bool cmdGood = true;
 
 	// Loop through and receive all arguments.
 	temp = strtok(line, delim);
@@ -384,6 +386,10 @@ void handle_command(char *line) {
 		printf("quit, exit:\t\t\texit the client.\n");
 		printf("status:\t\t\t\tshow unspent coins.\n");
 		printf("spend <amount> <address>:\tsend <amount> bitcoins to <address>.\n");
+		printf("\n\nDebugging Commands\n");
+		printf("================\n");
+		printf("show <debug/sizes/blocks/timeouts>:\tShow various debugging outputs.\n");
+		printf("hide <debug/sizes/blocks/timeouts>:\tHide various debugging outputs.\n");
 		return;
 	}
 
@@ -395,36 +401,42 @@ void handle_command(char *line) {
 
 	// Spend coins.
 	} else if (!strcmp(command, "spend")) {
-		if (count != 3) {
-			printf("Usage: spend <amount> <address>\n");
+		if ((count - 1) % 2 != 0) {
+			printf("Usage: spend <amount> <address> ... <amount> <address>\n");
 			return;
 		}
-		amt = strtoull(args[0], NULL, 10);
-		if (amt > calculate_owned_coins()) {
+
+		amts = malloc(sizeof(uint64_t *) * ((count - 1) / 2));
+		addrs = malloc(sizeof(char *) * ((count - 1) / 2));
+		for (i = 0; i < count - 1; i += 2) {
+			amts[i / 2] = strtoull(args[i], NULL, 10);
+			tamt += amts[i / 2];
+			addrs[i / 2] = args[i + 1];
+		}
+
+		if (tamt > calculate_owned_coins()) {
 			printf("Not enough coins!\n");
 		}
 
-		spend_coins(amt, args[1], strlen(args[1]));
+		spend_coins(amts, addrs, (count - 1) / 2);
 
 	} else if (!strcmp(command, "show")) {
-		if (count == 1) printf("%d\n", numWaiting);
-		else {
+		if (count > 1) {
 			for (i = 0; i < count - 1; i++) {
 				if (!strcmp(args[i], "debug")) {
 					printf("Showing debug logging.\n");
 					debug = true;
-				}
-				if (!strcmp(args[i], "sizes")) {
+				} else if (!strcmp(args[i], "sizes")) {
 					printf("Showing receive size logging.\n");
 					show_rcv = true;
-				}
-				if (!strcmp(args[i], "blocks")) {
+				} else if (!strcmp(args[i], "blocks")) {
 					printf("Showing block logging.\n");
 					show_blocks = true;
-				}
-				if (!strcmp(args[i], "timeouts")) {
+				} else if (!strcmp(args[i], "timeouts")) {
 					printf("Showing timeout logging.\n");
 					show_timeouts = true;
+				} else {
+					cmdGood = false;
 				}
 			}
 		}
@@ -435,27 +447,30 @@ void handle_command(char *line) {
 				if (!strcmp(args[i], "debug")) {
 					printf("Hiding debug logging.\n");
 					debug = false;
-				}
-				if (!strcmp(args[i], "sizes")) {
+				} else if (!strcmp(args[i], "sizes")) {
 					printf("Hiding receive size logging.\n");
 					show_rcv = false;
-				}
-				if (!strcmp(args[i], "blocks")) {
+				} else if (!strcmp(args[i], "blocks")) {
 					printf("Hiding block logging.\n");
 					show_blocks = false;
-				}
-				if (!strcmp(args[i], "timeouts")) {
+				} else if (!strcmp(args[i], "timeouts")) {
 					printf("Hiding timeout logging.\n");
 					show_timeouts = false;
+				} else {
+					cmdGood = false;
 				}
 			}
 		}
 
 	} else {
-		printf("Command not recognized!\n");
+		cmdGood = false;
 	}
 
 	free(args);
+
+	if (cmdGood) return;
+
+	printf("Command not recognized!\n");
 }
 
 /**
@@ -477,29 +492,32 @@ uint64_t calculate_owned_coins() {
 
 /**
  * Spend coins at a given bitcoin address.
- * spendAmount: Amount to spend.
- * address: Bitcoin address to spend coins at.
- * addr_len: Length of the address.
+ * spendAmounts: Amounts to spend.
+ * addresses: Bitcoin addresses to spend coins at.
+ * numSpends: Number of addresses we're spending at.
  */
-void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
+void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 	CBTransaction *tx;
 	CBTransactionOutput *unspentOut;
 	CBTransactionInput **ins = NULL;
-	CBScript *outScript, *changeScript;
-	CBByteArray *addressba;
-	CBVersionChecksumBytes *baseAddress;
-	uint64_t totalInputCoins = 0;
-	unsigned int i, numins = 0;
+	CBScript **outScripts, *changeScript;
+	CBByteArray **addressba;
+	CBVersionChecksumBytes **baseAddresses;
+	uint64_t totalInputCoins = 0, totalSpend = 0;
+	unsigned int i, numins = 0, sig_len;
 	bool coinbase;
 	uint32_t outputHeight;
 	uint8_t inputHash[32], *sig;
-	int sig_len;
 	CBInventoryItem *invitem;
+
+	for (i = 0; i < numSpends; i++) {
+		totalSpend += spendAmounts[i];
+	}
 
 	// Loop through and grab inputs.
 	for (i = ownedStart; i < numOwned; i++) {
 		// If we have enough coins now, quit.
-		if (totalInputCoins >= spendAmount) break;
+		if (totalInputCoins >= totalSpend) break;
 
 		// If the output is unspent...
 		if (CBBlockChainStorageUnspentOutputExists(fullVal, CBByteArrayGetData(ownedOutputs[i].txHash), ownedOutputs[i].outputIndex)) {
@@ -511,27 +529,33 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 			ins[numins - 1] = CBNewUnsignedTransactionInput(CB_TRANSACTION_INPUT_FINAL, ownedOutputs[i].txHash, ownedOutputs[i].outputIndex);
 			// Update total coins.
 			totalInputCoins += ownedOutputs[i].amount;
-		} else
+		} else {
 			ownedStart++;
+		}
 	}
 
 	// If we have enough coins...
-	if (totalInputCoins >= spendAmount) {
-		// Turn address into byte array.
-		addressba = CBNewByteArrayWithDataCopy(address, addr_len);
-		baseAddress = CBNewVersionChecksumBytesFromString(addressba, false);
+	if (totalInputCoins >= totalSpend) {
+		// Turn addresses into byte arrays.
+		addressba = malloc(sizeof(CBByteArray *) * numSpends);
+		baseAddresses = malloc(sizeof(CBVersionChecksumBytes *) * numSpends);
+		for (i = 0; i < numSpends; i++) {
+			addressba[i] = CBNewByteArrayWithDataCopy((uint8_t *)addresses[i], strlen(addresses[i]));
+			baseAddresses[i] = CBNewVersionChecksumBytesFromString(addressba[i], false);
+		}
 
-		// Setup scripts and script ops.
-		outScript = CBNewScriptOfSize(25);
-		CBByteArraySetByte(outScript, 0, CB_SCRIPT_OP_DUP);
-		CBByteArraySetByte(outScript, 1, CB_SCRIPT_OP_HASH160);
-		CBByteArraySetByte(outScript, 2, 20);
-		CBByteArraySetByte(outScript, 23, CB_SCRIPT_OP_EQUALVERIFY);
-		CBByteArraySetByte(outScript, 24, CB_SCRIPT_OP_CHECKSIG);
-		changeScript = CBNewByteArrayWithDataCopy(CBByteArrayGetData(outScript), 25);
-
-		// Copy addresses.
-		CBByteArraySetBytes(outScript, 3, CBByteArrayGetData(CBGetByteArray(baseAddress)), 20);
+		// Setup scripts and script ops. Copy addresses into outputs.
+		changeScript = CBNewScriptOfSize(25);
+		CBByteArraySetByte(changeScript, 0, CB_SCRIPT_OP_DUP);
+		CBByteArraySetByte(changeScript, 1, CB_SCRIPT_OP_HASH160);
+		CBByteArraySetByte(changeScript, 2, 20);
+		CBByteArraySetByte(changeScript, 23, CB_SCRIPT_OP_EQUALVERIFY);
+		CBByteArraySetByte(changeScript, 24, CB_SCRIPT_OP_CHECKSIG);
+		outScripts = malloc(sizeof(CBScript *) * numSpends);
+		for (i = 0; i < numSpends; i++) {
+			outScripts[i] = CBNewByteArrayWithDataCopy(CBByteArrayGetData(changeScript), 25);
+			CBByteArraySetBytes(outScripts[i], 3, CBByteArrayGetData(CBGetByteArray(baseAddresses[i])), 20);
+		}
 		CBByteArraySetBytes(changeScript, 3, CBByteArrayGetData(publicAddr), 20);
 
 		// Create transaction and add inputs.
@@ -540,12 +564,14 @@ void spend_coins(uint64_t spendAmount, char *address, uint32_t addr_len) {
 		tx->inputNum = numins;
 
 		// Add outputs.
-		tx->outputs = malloc(sizeof(CBTransactionOutput *) * 2);
+		tx->outputs = malloc(sizeof(CBTransactionOutput *) * numSpends + 1);
 		tx->outputNum = 2;
 
 		// Create outputs.
-		tx->outputs[0] = CBNewTransactionOutput(spendAmount, outScript);
-		tx->outputs[1] = CBNewTransactionOutput(totalInputCoins - spendAmount, changeScript);
+		for (i = 0; i < numSpends; i++) {
+			tx->outputs[i] = CBNewTransactionOutput(spendAmounts[i], outScripts[i]);
+		}
+		tx->outputs[numSpends] = CBNewTransactionOutput(totalInputCoins - totalSpend, changeScript);
 
 		// Loop through inputs and get signatures.
 		for (i = 0; i < numins; i++) {
@@ -853,7 +879,7 @@ void send_ping(CBPeer *peer) {
 	message->bytes = CBNewByteArrayOfSize(4 + sizeof(nonce));
 	message->serialised = true;
 
-	CBByteArraySetBytes(message->bytes, 0, "ping", 4);
+	CBByteArraySetBytes(message->bytes, 0, (uint8_t *)"ping", 4);
 	CBByteArraySetBytes(message->bytes, 0, (uint8_t *)&nonce, sizeof(nonce));
 
 	queue_message(peer, message);
@@ -871,7 +897,7 @@ void send_pong(CBPeer *peer, int nonce) {
 	message->bytes = CBNewByteArrayOfSize(4 + sizeof(nonce));
 	message->serialised = true;
 
-	CBByteArraySetBytes(message->bytes, 0, "pong", 4);
+	CBByteArraySetBytes(message->bytes, 0, (uint8_t *)"pong", 4);
 	CBByteArraySetBytes(message->bytes, 0, (uint8_t *)&nonce, sizeof(nonce));	
 
 	queue_message(peer, message);
@@ -1083,7 +1109,7 @@ void receive_message(CBPeer *peer) {
 
 	bool is_block = !strncmp(header + CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12);
 
-	if (debug && show_rcv && !is_block) printf("received %d byte ", tread);
+	if (debug && show_rcv && !is_block) printf("%d byte(s): ", tread);
 
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
 		// If we received a version header.
