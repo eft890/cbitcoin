@@ -110,6 +110,6 @@ bool CBEcdsaSign(uint8_t * hash, uint8_t * privkey, unsigned int *nSig, uint8_t 
         return 0;
     }
     EC_KEY_free(pkey);
-    printf("signed: %u\n", *nSig);
+    // printf("signed: %u\n", *nSig);
     return 1;
 }
