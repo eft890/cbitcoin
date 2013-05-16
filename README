@@ -1,0 +1,17 @@
+BitShekel
+---------
+"Diversify your coins."
+
+I had to make some assumptions while developing this client. Early on, connecting to other clients other than the main server (kale)
+proved to be an issue. I do send a "getaddr" message to get the other clients that kale knows of, but do not connect to them. I
+decided not to connect to them because I had not setup non-blocking sockets and the failing connections would block and stall the
+entire client.
+
+I made it all the way through the rest of section 1 with relative ease, until the transaction creation. I was able to create a
+transaction that I thought would work. I even created a verification function (verify_tx) to check that executing the input scripts
+of the generated transaction against the previous output scripts. The function said that it was valid, but after sending a tx message
+to kale, I wasn't seeing any updated blocks with my transactions.
+
+There are some severe memory leaks in the client that I was having trouble with. The main problem was seeing where the underling
+cbitcoin client was adding references and malloc'ing memory. I was able to fix a couple of memory leaks in the base code itself and
+reduce my overall memory leakage, but I was not able to get all of it.
