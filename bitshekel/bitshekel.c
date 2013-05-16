@@ -67,9 +67,7 @@ CBFullValidator *fullVal;
 uint64_t bcStorage;
 bool badBCS;
 
-// Shared inventory broadcast object. Will be filled when there is inventory to broadcast.
-CBInventoryBroadcast *invbroad = NULL;
-CBInventoryItemType invtype;
+// Shared variables for determining if a getblocks is necessary.
 int lastGetData = 0;
 bool uptodate = false, getblockssent = false;
 int numWaiting = 0;
@@ -119,12 +117,12 @@ void send_ping(CBPeer *peer);
 void send_pong(CBPeer *peer, int nonce);
 void send_getaddr(CBPeer *peer);
 void send_getblocks(CBPeer *peer);
-void send_getdata(CBPeer *peer);
-void send_inv(CBPeer *peer);
+void send_getdata(CBPeer *peer, CBInventoryBroadcast *invbroad);
+void send_inv(CBPeer *peer, CBInventoryBroadcast *invbroad);
 void send_tx(CBPeer *peer, uint8_t *hash);
 void receive_message(CBPeer *peer);
 void parse_addr(uint8_t *addrlistdata);
-void parse_inv(uint8_t *invdata, unsigned int length);
+void parse_inv(uint8_t *invdata, unsigned int length, CBPeer *peer);
 void parse_getdata(uint8_t *gddata, unsigned int length, CBPeer *peer);
 void parse_block(uint8_t *blockdata, unsigned int block);
 void parse_tx(uint8_t *txdata, unsigned int length);
@@ -214,10 +212,6 @@ int main(int argc, char *argv[]) {
 					send_getblocks(peer);
 					numWaiting = 0;
 					getblockssent = true;
-				}
-				if (invbroad) {
-					if (invtype == CB_INVENTORY_ITEM_BLOCK) send_getdata(peer);
-					else if (invtype == CB_INVENTORY_ITEM_TRANSACTION) send_inv(peer);
 				}
 			}
 		} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
@@ -311,8 +305,6 @@ int main(int argc, char *argv[]) {
 	CBReleaseObject(publicAddr);
 	CBReleaseObject(bc_address);
 	CBReleaseObject(bc_addressba);
-
-	if (invbroad) CBReleaseObject(invbroad);
 
 	return 0;
 }
@@ -539,6 +531,9 @@ void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 	uint32_t outputHeight;
 	uint8_t inputHash[32], *sig;
 	CBInventoryItem *invitem;
+	CBPosition iter;
+	CBInventoryBroadcast *invbroad;
+	CBPeer *peer;
 
 	for (i = 0; i < numSpends; i++) {
 		totalSpend += spendAmounts[i];
@@ -591,7 +586,7 @@ void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 		CBByteArraySetBytes(changeScript, 3, CBByteArrayGetData(publicAddr), 20);
 
 		// Create transaction and add inputs.
-		tx = CBNewTransaction(0, VERSION);
+		tx = CBNewTransaction(0, 1);
 		tx->inputs = ins;
 		tx->inputNum = numins;
 
@@ -628,6 +623,7 @@ void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 		// Serialize transaction for hash.
 		CBGetMessage(tx)->bytes = CBNewByteArrayOfSize(CBTransactionCalculateLength(tx));
 		CBTransactionSerialise(tx, false);
+		if (debug) { printf("tx bytes: "); print_hex(CBGetMessage(tx)->bytes); }
 
 		// CBTransaction *testtx = CBNewTransactionFromData(CBGetMessage(tx)->bytes);
 		// CBTransactionDeserialise(testtx);
@@ -646,7 +642,6 @@ void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 		invbroad->items = malloc(sizeof(CBInventoryItem *));
 		invbroad->items[0] = invitem;
 		invbroad->itemNum = 1;
-		invtype = CB_INVENTORY_ITEM_TRANSACTION;
 
 		// Add transaction to known transactions.
 		numKnownTx++;
@@ -655,6 +650,12 @@ void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 
 		// Unmark the spent outputs.
 		ownedStart += numins;
+
+		CBAssociativeArrayGetFirst(&peerSocks, &iter);
+		do {
+			peer = (CBPeer *)(iter.node->elements[iter.index]);
+			send_inv(peer, invbroad);
+		} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
 
 		// Cleanup memory.
 		free(addressba);
@@ -1099,7 +1100,7 @@ void send_getblocks(CBPeer *peer) {
  * Send a getdata message to a peer.
  * peer: Peer to get data from.
  */
-void send_getdata(CBPeer *peer) {
+void send_getdata(CBPeer *peer, CBInventoryBroadcast *invbroad) {
 	uint32_t message_len;
 	CBMessage *message, *qmessage;
 
@@ -1125,7 +1126,7 @@ void send_getdata(CBPeer *peer) {
  * Send an inv message to a peer.
  * peer: Peer to send inv to.
  */
-void send_inv(CBPeer *peer) {
+void send_inv(CBPeer *peer, CBInventoryBroadcast *invbroad) {
 	uint32_t message_len;
 	CBMessage *message, *qmessage;
 
@@ -1221,7 +1222,7 @@ void receive_message(CBPeer *peer) {
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		// We've received an inv header. Parse the payload for inventory.
 		if (debug) printf("inv in\n");
-		parse_inv((uint8_t *)payload, tread);
+		parse_inv((uint8_t *)payload, tread, peer);
 	}
 	if (!strncmp(header + CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12)) {
 		// We've received a block header. Parse it into a block and process.
@@ -1294,25 +1295,75 @@ void parse_addr(uint8_t *addrlistdata) {
  * Parse an inventory list. For right now, it assumes it's a block list.
  * invdata: The raw bytes of the inventory list.
  * length: Length of the raw bytes.
+ * peer: Peer message was received from.
  */
-void parse_inv(uint8_t *invdata, unsigned int length) {
+void parse_inv(uint8_t *invdata, unsigned int length, CBPeer *peer) {
 	CBByteArray *invbroadba;
-
-	// Check if there was an invbroad ready to send but was never sent.
-	if (invbroad) CBReleaseObject(invbroad);
+	CBInventoryBroadcast *invbroad;
+	CBInventoryItem *invitem, **invitemsout;
+	uint16_t i, numout = 0;
+	unsigned int j;
+	bool found;
+	// CBPosition iter;
+	// CBPeer *looppeer;
 
 	// Copy raw bytes and deserialise.
 	invbroadba = CBNewByteArrayWithDataCopy(invdata, length);
 	invbroad = CBNewInventoryBroadcastFromData(invbroadba);
 	CBInventoryBroadcastDeserialise(invbroad);
-	invtype = CB_INVENTORY_ITEM_BLOCK;
-
-	// We've received the response to getblocks, set inv count and flag.
-	lastGetData = invbroad->itemNum;
-	getblockssent = false;
 
 	if (debug) printf("items received: %d\n", invbroad->itemNum);
-	CBReleaseObject(invbroadba);
+
+	if (getblockssent) {
+		// We've received the response to getblocks, set inv count and flag.
+		lastGetData = invbroad->itemNum;
+		getblockssent = false;
+
+		send_getdata(peer, invbroad);
+
+		CBReleaseObject(invbroadba);
+	} else {
+		for (i = 0; i < invbroad->itemNum; i++) {
+			invitem = invbroad->items[i];
+			if (invitem->type == CB_INVENTORY_ITEM_TRANSACTION) {
+				found = false;
+				for (j = 0; j < numKnownTx; j++) {
+					if (!memcmp(CBByteArrayGetData(invitem->hash), txs[j]->hash, 32)) {
+						if (debug) printf("known transaction detected.\n");
+						found = true;
+					}
+				}
+				if (found) {
+					numout++;
+					invitemsout = realloc(invitemsout, sizeof(CBInventoryItem *) * numout);
+					invitemsout[numout - 1] = invitem;
+					CBRetainObject(invitem);
+				}
+			}
+		}
+
+		CBReleaseObject(invbroad);
+		CBReleaseObject(invbroadba);
+		invbroad = NULL;
+
+		if (numout) {
+			// Setup new inventory broadcast of items we don't have.
+			invbroad = CBNewInventoryBroadcast();
+			invbroad->itemNum = numout;
+			invbroad->items = invitemsout;
+
+			// Send getdata request to inv sender.
+			send_getdata(peer, invbroad);
+
+			// COMMENTED OUT: verification code not in.
+			// Loop through all peers and send inv to them.
+			// CBAssociativeArrayGetFirst(&peerSocks, &iter);
+			// do {
+			// 	looppeer = (CBPeer *)(iter.node->elements[iter.index]);
+			// 	send_inv(looppeer, invbroad);
+			// } while (!CBAssociativeArrayIterate(&peerSocks, &iter));
+		}
+	}
 }
 
 /**
@@ -1374,7 +1425,7 @@ void parse_block(uint8_t *blockdata, unsigned int length) {
 					CBByteArrayGetByte(script, 23) == CB_SCRIPT_OP_EQUALVERIFY &&
 					CBByteArrayGetByte(script, 24) == CB_SCRIPT_OP_CHECKSIG) {
 					// Standard bitcoin transaction. Compare against our key.
-					pubKeyHash = CBByteArraySubReference(script, 3, script->length - 5);
+					pubKeyHash = CBByteArraySubReference(script, 3, 20);
 					if (CBByteArrayCompare(publicAddr, pubKeyHash) == CB_COMPARE_EQUAL) {
 						ownedOutputs = realloc(ownedOutputs, sizeof(UnspentOutput));
 						ownedOutputs[numOwned].txHash = CBNewByteArrayWithDataCopy(tx->hash, 32);
