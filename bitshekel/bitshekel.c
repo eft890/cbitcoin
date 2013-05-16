@@ -25,7 +25,7 @@
 #include <CBTransactionOutput.h>
 #include <CBScript.h>
 #include <CBObject.h>
-#include <CBVersionChecksumBytes.h>
+#include <CBAddress.h>
 
 // Client version.
 #define VERSION 70001
@@ -107,6 +107,7 @@ void rl_handler(char *line);
 void handle_command(char *line);
 uint64_t calculate_owned_coins();
 void spend_coins(uint64_t* spendAmounts, char **addresses, int numSpends);
+bool verify_tx(CBTransaction* tx);
 void connect_client(CBNetworkAddress *addr);
 bool send_message(CBPeer *peer, CBMessage *message);
 bool queue_message(CBPeer *peer, CBMessage *message);
@@ -141,7 +142,7 @@ int main(int argc, char *argv[]) {
 	CBPeer *peer;
 	CBMessage *message;
 	struct timeval timeout;
-	CBVersionChecksumBytes *bc_address;
+	CBAddress *bc_address;
 
 	// Check for debug output argument.
 	if (argc > 1) {
@@ -173,7 +174,7 @@ int main(int argc, char *argv[]) {
 
 	// Create our bitcoin address.
 	bc_addressba = CBNewByteArrayWithDataCopy((uint8_t *)BC_ADDRESS, BC_ADDRESS_LEN);
-	bc_address = CBNewVersionChecksumBytesFromString(bc_addressba, false);
+	bc_address = CBNewAddressFromString(bc_addressba, false);
 	publicAddr = CBByteArraySubReference(CBGetByteArray(bc_address), 1, 20);
 
 	// max file descriptor number
@@ -290,7 +291,7 @@ int main(int argc, char *argv[]) {
 	do {
 		peer = (CBPeer *)(iter.node->elements[iter.index]);
 		close(peer->socketID);
-		CBReleaseObject(peer);
+		CBFreeNetworkAddress(CBGetNetworkAddress(peer));
 	} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
 
 	// Cleanup memory.
@@ -383,13 +384,13 @@ void handle_command(char *line) {
 	if (!strcmp(command, "help")) {
 		printf("Commands\n");
 		printf("========\n");
-		printf("quit, exit:\t\t\texit the client.\n");
-		printf("status:\t\t\t\tshow unspent coins.\n");
-		printf("spend <amount> <address>:\tsend <amount> bitcoins to <address>.\n");
+		printf("quit, exit:\t\t\t\t\t\texit the client.\n");
+		printf("status:\t\t\t\t\t\t\tshow unspent coins.\n");
+		printf("spend <amount> <address> ... <amount> <address>:\tsend <amounts> bitcoins to <addreses>.\n");
 		printf("\n\nDebugging Commands\n");
 		printf("================\n");
-		printf("show <debug/sizes/blocks/timeouts>:\tShow various debugging outputs.\n");
-		printf("hide <debug/sizes/blocks/timeouts>:\tHide various debugging outputs.\n");
+		printf("show <debug/sizes/blocks/timeouts>:\t\t\tShow various debugging outputs.\n");
+		printf("hide <debug/sizes/blocks/timeouts>:\t\t\tHide various debugging outputs.\n");
 		return;
 	}
 
@@ -419,6 +420,8 @@ void handle_command(char *line) {
 		}
 
 		spend_coins(amts, addrs, (count - 1) / 2);
+		free(amts);
+		free(addrs);
 
 	} else if (!strcmp(command, "show")) {
 		if (count > 1) {
@@ -502,7 +505,7 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 	CBTransactionInput **ins = NULL;
 	CBScript **outScripts, *changeScript;
 	CBByteArray **addressba;
-	CBVersionChecksumBytes **baseAddresses;
+	CBAddress **baseAddresses;
 	uint64_t totalInputCoins = 0, totalSpend = 0;
 	unsigned int i, numins = 0, sig_len;
 	bool coinbase;
@@ -538,10 +541,12 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 	if (totalInputCoins >= totalSpend) {
 		// Turn addresses into byte arrays.
 		addressba = malloc(sizeof(CBByteArray *) * numSpends);
-		baseAddresses = malloc(sizeof(CBVersionChecksumBytes *) * numSpends);
+		baseAddresses = malloc(sizeof(CBAddress *) * numSpends);
 		for (i = 0; i < numSpends; i++) {
+			if (debug) printf("decode address: %s of length %d\n", addresses[i], strlen(addresses[i]));
 			addressba[i] = CBNewByteArrayWithDataCopy((uint8_t *)addresses[i], strlen(addresses[i]));
-			baseAddresses[i] = CBNewVersionChecksumBytesFromString(addressba[i], false);
+			baseAddresses[i] = CBNewAddressFromString(addressba[i], false);
+			if (debug) { printf("decoded address: "); print_hex(CBGetByteArray(baseAddresses[i])); }
 		}
 
 		// Setup scripts and script ops. Copy addresses into outputs.
@@ -554,7 +559,7 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 		outScripts = malloc(sizeof(CBScript *) * numSpends);
 		for (i = 0; i < numSpends; i++) {
 			outScripts[i] = CBNewByteArrayWithDataCopy(CBByteArrayGetData(changeScript), 25);
-			CBByteArraySetBytes(outScripts[i], 3, CBByteArrayGetData(CBGetByteArray(baseAddresses[i])), 20);
+			CBByteArraySetBytes(outScripts[i], 3, CBByteArrayGetData(CBByteArraySubReference(CBGetByteArray(baseAddresses[i]), 1, 20)), 20);
 		}
 		CBByteArraySetBytes(changeScript, 3, CBByteArrayGetData(publicAddr), 20);
 
@@ -597,6 +602,15 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 		CBGetMessage(tx)->bytes = CBNewByteArrayOfSize(CBTransactionCalculateLength(tx));
 		CBTransactionSerialise(tx, false);
 
+		// CBTransaction *testtx = CBNewTransactionFromData(CBGetMessage(tx)->bytes);
+		// CBTransactionDeserialise(testtx);
+
+		// if (verify_tx(testtx)) {
+		// 	printf("transaction valid\n");
+		// } else {
+		// 	printf("transaction not valid\n");
+		// }
+
 		// Calculate transaction hash and put the data into an inventory item.
 		invitem = CBNewInventoryItem(CB_INVENTORY_ITEM_TRANSACTION, CBNewByteArrayWithDataCopy(CBTransactionGetHash(tx), 32));
 
@@ -620,6 +634,56 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 }
 
 /**
+ * Verify that a transaction is valid.
+ * tx: The transaction to validate.
+ * returns: True if the transaction is valid, false otherwise.
+ */
+bool verify_tx(CBTransaction *tx) {
+	CBTransactionInput *in;
+	CBTransactionOutput *prevOut;
+	CBScriptStack stack;
+	uint32_t i;
+	bool coinbase;
+	uint32_t outputHeight;
+
+	// Loop through all inputs of transaction.
+	for (i = 0; i < tx->inputNum; i++) {
+		in = tx->inputs[i];
+		// Check if the unspent previous output exists.
+		if (!CBBlockChainStorageUnspentOutputExists(fullVal, CBByteArrayGetData(in->prevOut.hash), in->prevOut.index)) {
+			return false;
+		}
+
+		if (debug) { printf("verifying output %d of transaction ", in->prevOut.index); print_hex(in->prevOut.hash); }
+
+		// Load the previous output.
+		prevOut = CBBlockChainStorageLoadUnspentOutput(fullVal, CBByteArrayGetData(in->prevOut.hash), in->prevOut.index, &coinbase, &outputHeight);
+		if (!prevOut) {
+			return false;
+		}
+
+		// Setup script stack.
+		stack = CBNewEmptyScriptStack();
+		// Run input script to load signature and public key.
+		CBScriptExecute(in->scriptObject, &stack, NULL, NULL, 0, false);
+		// Run output script to verify input signature.
+		if (CBScriptExecute(prevOut->scriptObject, &stack, CBTransactionGetInputHashForSignature, tx, in->prevOut.index, false) != CB_SCRIPT_TRUE) {
+			// Failed. Free and return.
+			CBFreeScriptStack(stack);
+			CBReleaseObject(prevOut);
+			return false;
+		}
+
+		// Cleanup memory.
+		CBFreeScriptStack(stack);
+		CBReleaseObject(prevOut);
+	}
+
+	// Verification of all inputs succeeded. Return true.
+	return true;
+}
+
+/**
  * Helper function. Connects to a client and saves peer in data structure.
  * Then kicks off version exchange.
  * address: An array of length 4. Holds the 4 parts of an ip address in normal order.
@@ -633,7 +697,7 @@ void connect_client(CBNetworkAddress *netAddr) {
 
 	// Create socket.
 	if ((sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
-		perror("Error creating client socket");
+		if (debug) perror("Error creating client socket");
 		return;
 	}
 
@@ -643,11 +707,15 @@ void connect_client(CBNetworkAddress *netAddr) {
 	addr.sin_port = htons(netAddr->port);
 	addr.sin_addr.s_addr = CBByteArrayReadInt32(netAddr->ip, 12);
 
+	if (debug) printf("Attempting connection...\n");
+
 	// Connect to client.
 	if (connect(sock, (struct sockaddr *)&addr, sizeof addr) < 0) {
-		perror("Error connecting to client");
+		if (debug) perror("Error connecting to client");
 		return;
 	}
+
+	if (debug) printf("Successful connection.\n");
 
 	// Setup peer.
 	peer = CBNewPeerByTakingNetworkAddress(netAddr);
@@ -1093,7 +1161,7 @@ void receive_message(CBPeer *peer) {
 	// Read message header from socket.
 	recv(peer->socketID, header, 24, 0);
 	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
-		if (debug) printf("Wrong netmagic.\n");
+		// if (debug) printf("Wrong netmagic.\n");
 		return;
 	}
 
@@ -1286,6 +1354,7 @@ void parse_block(uint8_t *blockdata, unsigned int length) {
 					if (CBByteArrayCompare(publicAddr, pubKeyHash) == CB_COMPARE_EQUAL) {
 						ownedOutputs = realloc(ownedOutputs, sizeof(UnspentOutput));
 						ownedOutputs[numOwned].txHash = CBNewByteArrayWithDataCopy(tx->hash, 32);
+						if (debug) { printf("storing transaction: "); print_hex(ownedOutputs[numOwned].txHash); }
 						ownedOutputs[numOwned].outputIndex = out;
 						ownedOutputs[numOwned].amount = tx->outputs[out]->value;
 						numOwned++;
@@ -1294,6 +1363,7 @@ void parse_block(uint8_t *blockdata, unsigned int length) {
 				}
 			}
 		}
+		CBReleaseObject(block);
 	}
 
 	// Reduce count of get data request.
