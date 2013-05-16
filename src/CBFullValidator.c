@@ -228,8 +228,11 @@ CBBlockStatus CBFullValidatorBasicBlockValidation(CBFullValidator * self, CBBloc
 		return CB_BLOCK_STATUS_ERROR;
 	// Check merkle root
 	int res = memcmp(txHashes, CBByteArrayGetData(block->merkleRoot), 32);
-	if (res)
+	if (res) {
+		free(txHashes);
 		return CB_BLOCK_STATUS_BAD;
+	}
+	free(txHashes);
 	return CB_BLOCK_STATUS_CONTINUE;
 }
 CBBlockValidationResult CBFullValidatorCompleteBlockValidation(CBFullValidator * self, uint8_t branch, CBBlock * block, uint32_t height){

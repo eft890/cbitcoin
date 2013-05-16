@@ -106,7 +106,7 @@ CBCompare compare_peers(void *key1, void *key2);
 void rl_handler(char *line);
 void handle_command(char *line);
 uint64_t calculate_owned_coins();
-void spend_coins(uint64_t* spendAmounts, char **addresses, int numSpends);
+void send_coins(uint64_t* spendAmounts, char **addresses, int numSpends);
 bool verify_tx(CBTransaction* tx);
 void connect_client(CBNetworkAddress *addr);
 bool send_message(CBPeer *peer, CBMessage *message);
@@ -298,7 +298,7 @@ int main(int argc, char *argv[]) {
 		}
 
 		close(peer->socketID);
-		CBFreeNetworkAddress(CBGetNetworkAddress(peer));
+		// CBFreeNetworkAddress(CBGetNetworkAddress(peer));
 	} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
 
 	// Cleanup memory.
@@ -371,7 +371,7 @@ void rl_handler(char *line) {
  */
 void handle_command(char *line) {
 	char delim[] = " ";
-	char *command = NULL, **args = NULL, *temp = NULL, **addrs = NULL;
+	char *command = NULL, **args = NULL, *temp = NULL, **addrs = NULL, *tempamt = NULL;
 	int count = 0, i;
 	uint64_t *amts = NULL, tamt = 0;
 	bool cmdGood = true;
@@ -401,7 +401,7 @@ void handle_command(char *line) {
 		printf("========\n");
 		printf("quit, exit:\t\t\t\t\t\texit the client.\n");
 		printf("status:\t\t\t\t\t\t\tshow unspent coins.\n");
-		printf("spend <amount> <address> ... <amount> <address>:\tsend <amounts> bitcoins to <addreses>.\n");
+		printf("send <amount> <address> ... <amount> <address>:\tsend <amounts> bitcoins to <addreses>.\n");
 		printf("\n\nDebugging Commands\n");
 		printf("================\n");
 		printf("show <debug/sizes/blocks/timeouts>:\t\t\tShow various debugging outputs.\n");
@@ -409,20 +409,28 @@ void handle_command(char *line) {
 
 	// Check coin status.
 	} else if (!strcmp(command, "status")) {
-		printf("Unspent coins: %llu", calculate_owned_coins());
+		tamt = calculate_owned_coins();
+		printf("Unspent coins: %llu.%08llu", tamt / 100000000, tamt % 100000000);
 		if (!uptodate) printf(" (Warning: not up to date!)");
 		printf("\n");
 
-	// Spend coins.
-	} else if (!strcmp(command, "spend")) {
+	// Send coins.
+	} else if (!strcmp(command, "send")) {
 		if ((count - 1) % 2 != 0) {
-			printf("Usage: spend <amount> <address> ... <amount> <address>\n");
+			printf("Usage: send <amount> <address> ... <amount> <address>\n");
 		}
 
 		amts = malloc(sizeof(uint64_t *) * ((count - 1) / 2));
 		addrs = malloc(sizeof(char *) * ((count - 1) / 2));
+		memset(delim, ".", 1);
 		for (i = 0; i < count - 1; i += 2) {
-			amts[i / 2] = strtoull(args[i], NULL, 10);
+			tempamt = strtok(args[i], delim);
+			if ((temp = strtok(NULL, delim))) {
+				amts[i / 2] = strtoull(tempamt, NULL, 10) * 100000000;
+				amts[i / 2] += strtoull(temp, NULL, 10);
+			} else {
+				amts[i / 2] = strtoull(tempamt, NULL, 10);
+			}
 			tamt += amts[i / 2];
 			addrs[i / 2] = args[i + 1];
 		}
@@ -431,7 +439,13 @@ void handle_command(char *line) {
 			printf("Not enough coins!\n");
 		}
 
-		spend_coins(amts, addrs, (count - 1) / 2);
+		printf("Sending coins:");
+		for (i = 0; i < (count - 1) / 2; i++) {
+			printf(" %llu.%08llu to %s", tamt / 100000000, tamt % 100000000, addrs[i]);
+			if (i < ((count - 1) / 2) - 1) printf(",");
+			else printf(".\n");
+		}
+		send_coins(amts, addrs, (count - 1) / 2);
 		free(amts);
 		free(addrs);
 
@@ -511,7 +525,7 @@ uint64_t calculate_owned_coins() {
  * addresses: Bitcoin addresses to spend coins at.
  * numSpends: Number of addresses we're spending at.
  */
-void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
+void send_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 	CBTransaction *tx;
 	CBTransactionOutput *unspentOut;
 	CBTransactionInput **ins = NULL;
@@ -640,6 +654,10 @@ void spend_coins(uint64_t *spendAmounts, char **addresses, int numSpends) {
 
 		// Unmark the spent outputs.
 		ownedStart += numins;
+
+		// Cleanup memory.
+		free(addressba);
+		free(baseAddresses);
 	} else {
 		printf("Not enough coins!\n");
 	}
@@ -1073,7 +1091,7 @@ void send_getblocks(CBPeer *peer) {
 	// Cleanup memory
 	CBReleaseObject(getBlocks);
 	CBReleaseObject(hashStop);
-	free(chainDesc);
+	CBFreeChainDescriptor(chainDesc);
 }
 
 /**
@@ -1166,7 +1184,7 @@ void receive_message(CBPeer *peer) {
 	// Read message header from socket.
 	recv(peer->socketID, header, 24, 0);
 	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
-		// if (debug) printf("Wrong netmagic.\n");
+		if (debug) printf("Wrong netmagic.\n");
 		return;
 	}
 
@@ -1368,7 +1386,6 @@ void parse_block(uint8_t *blockdata, unsigned int length) {
 				}
 			}
 		}
-		CBReleaseObject(block);
 	}
 
 	// Reduce count of get data request.
