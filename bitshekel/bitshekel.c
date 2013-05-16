@@ -402,7 +402,7 @@ void handle_command(char *line) {
 		printf("quit, exit:\t\t\t\t\t\texit the client.\n");
 		printf("status:\t\t\t\t\t\t\tshow unspent coins.\n");
 		printf("send <amount> <address> ... <amount> <address>:\tsend <amounts> bitcoins to <addreses>.\n");
-		printf("\t\t\t\t\t\t\t\t'200' would be decimals, '200.0' would be full coins\n");;
+		printf("\t\t\t\t\t\t'200' would be decimals, '200.0' would be full coins\n");;
 		printf("\n\nDebugging Commands\n");
 		printf("================\n");
 		printf("show <debug/sizes/blocks/timeouts>:\t\t\tShow various debugging outputs.\n");
