@@ -290,6 +290,13 @@ int main(int argc, char *argv[]) {
 	CBAssociativeArrayGetFirst(&peerSocks, &iter);
 	do {
 		peer = (CBPeer *)(iter.node->elements[iter.index]);
+
+		// Remove pending messages.
+		while (peer->sendQueueSize) {
+			message = dequeue_message(peer);
+			CBReleaseObject(message);
+		}
+
 		close(peer->socketID);
 		CBFreeNetworkAddress(CBGetNetworkAddress(peer));
 	} while (!CBAssociativeArrayIterate(&peerSocks, &iter));
@@ -298,6 +305,13 @@ int main(int argc, char *argv[]) {
 	CBReleaseObject(&peerSocks);
 	CBReleaseObject(fullVal);
 	CBFreeBlockChainStorage(bcStorage);
+
+	CBReleaseObject(kaleIP);
+
+	CBReleaseObject(publicAddr);
+	CBReleaseObject(bc_address);
+	CBReleaseObject(bc_addressba);
+
 	if (invbroad) CBReleaseObject(invbroad);
 
 	return 0;
@@ -378,10 +392,11 @@ void handle_command(char *line) {
 	if (!temp && !count) command = line;
 
 	// Exit requested.
-	if (!strcmp(command, "exit") || !strcmp(command, "quit")) { running = false; return; }
+	if (!strcmp(command, "exit") || !strcmp(command, "quit")) {
+		running = false;
 
 	// Help requested.
-	if (!strcmp(command, "help")) {
+	} else if (!strcmp(command, "help")) {
 		printf("Commands\n");
 		printf("========\n");
 		printf("quit, exit:\t\t\t\t\t\texit the client.\n");
@@ -391,11 +406,9 @@ void handle_command(char *line) {
 		printf("================\n");
 		printf("show <debug/sizes/blocks/timeouts>:\t\t\tShow various debugging outputs.\n");
 		printf("hide <debug/sizes/blocks/timeouts>:\t\t\tHide various debugging outputs.\n");
-		return;
-	}
 
 	// Check coin status.
-	if (!strcmp(command, "status")) {
+	} else if (!strcmp(command, "status")) {
 		printf("Unspent coins: %llu", calculate_owned_coins());
 		if (!uptodate) printf(" (Warning: not up to date!)");
 		printf("\n");
@@ -404,7 +417,6 @@ void handle_command(char *line) {
 	} else if (!strcmp(command, "spend")) {
 		if ((count - 1) % 2 != 0) {
 			printf("Usage: spend <amount> <address> ... <amount> <address>\n");
-			return;
 		}
 
 		amts = malloc(sizeof(uint64_t *) * ((count - 1) / 2));
@@ -863,15 +875,6 @@ bool send_message(CBPeer *peer, CBMessage *message) {
 		if (send(peer->socketID, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0) != message->bytes->length)
 			return false;
 
-	// Set peer flags.
-	switch (message->type) {
-		case CB_MESSAGE_TYPE_VERSION:
-			peer->versionSent = true; break;
-		case CB_MESSAGE_TYPE_GETADDR:
-			peer->getAddresses = true; break;
-		default: break;
-	}
-
 	CBReleaseObject(message);
 
 	return true;
@@ -911,6 +914,7 @@ void send_version(CBPeer *peer) {
 
 	// Kick off version exchange by sending our version.
 	queue_message(peer, qmessage);
+	peer->versionSent = true;
 
 	// Cleanup memory.
 	CBReleaseObject(version);
@@ -984,6 +988,7 @@ void send_getaddr(CBPeer *peer) {
 	message->serialised = true;
 
 	queue_message(peer, message);
+	peer->getAddresses = true;
 }
 
 /**
